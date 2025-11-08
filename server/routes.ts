@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { n8nAgentService } from "./services/n8nAgentService";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./auth";
 import { z } from "zod";
@@ -732,8 +733,24 @@ app.post('/api/n8n/jobs/:name/run', requireBearerOrReject, async (req: any, res)
       console.error("Error fetching audit logs:", error);
       res.status(500).json({ message: "Failed to fetch audit logs" });
     }
+    
   });
+  app.post("/api/agent/n8n/scan", isAuthenticated, async (req: any, res) => {
+    try {
+      const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+      const out = await n8nAgentService.run(rows);
 
+      if (typeof out === "object" && out !== null && "raw" in out && typeof (out as any).raw === "string") {
+        res.type("text/plain").status(200).send((out as any).raw);
+      } else {
+        res.type("application/json").status(200).json(out);
+      }
+    } catch (err: any) {
+      console.error("n8n/scan error:", err);
+      res.status(500).json({ message: err?.message ?? "n8n scan failed" });
+    }
+  });
   const httpServer = createServer(app);
   return httpServer;
 }
+
