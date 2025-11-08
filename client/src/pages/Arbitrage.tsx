@@ -11,9 +11,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import ArbitrageCard from "@/components/ArbitrageCard";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { Search, Filter, TrendingUp, DollarSign, Target, Clock, AlertTriangle, Crown, CreditCard } from "lucide-react";
+import { Search, Filter, TrendingUp, Clock, AlertTriangle, Crown, CreditCard } from "lucide-react";
 import type { ArbitrageOpportunityDisplay } from "@/types";
 
+/* -------------------- Types (same as before) -------------------- */
 interface ScanRequest {
   states: string[];
   sports?: string[];
@@ -47,50 +48,85 @@ interface ArbitrageScanResult {
   cacheExpiresAt: string;
 }
 
+/* -------------------- Agent bridge -------------------- */
+/** Normalizes any agent response shape into ArbitrageScanResult */
+function normalizeAgentResult(payload: any): ArbitrageScanResult {
+  // Agent might return { result: {...} } or the result at top-level.
+  const root = payload?.result ?? payload ?? {};
+  const opportunities: ArbitrageOpportunityDisplay[] =
+    root.allOpportunities ?? root.opportunities ?? [];
+
+  const creditUsage = root.creditUsage ?? {
+    requestsUsed: Number(root.requestsUsed ?? 0) || 0,
+    creditsConsumed: Number(root.creditsConsumed ?? 0) || 0,
+  };
+
+  const cacheExpiresAt: string =
+    typeof root.cacheExpiresAt === "string"
+      ? root.cacheExpiresAt
+      : new Date(Date.now() + 5 * 60 * 1000).toISOString(); // default 5m
+
+  return {
+    success: !!(payload?.success ?? true),
+    maxProfitPick: root.maxProfitPick,
+    allOpportunities: opportunities,
+    creditUsage,
+    cacheExpiresAt,
+  };
+}
+
+/** Calls your Agent endpoint. Adjust URL/body to match your server. */
+async function runAgentScan(request: ScanRequest): Promise<ArbitrageScanResult> {
+  const res = await apiRequest("POST", "/api/agent/run", {
+    agent: "arbitrage",
+    input: { action: "scan", request, confirmed: true },
+  });
+  const data = await res.json();
+  return normalizeAgentResult(data);
+}
+
+/* -------------------- Component -------------------- */
 export default function Arbitrage() {
   const { toast } = useToast();
   const [scanResults, setScanResults] = useState<ArbitrageScanResult | null>(null);
   const [lastScanTime, setLastScanTime] = useState<Date | null>(null);
-  
+
   const [filters, setFilters] = useState<ScanRequest>({
     states: [],
-    sports: ['all'],
-    regions: ['us', 'us2'],
-    markets: ['h2h', 'spreads', 'totals'],
-    minProfitPct: 1.0
+    sports: ["all"],
+    regions: ["us", "us2"],
+    markets: ["h2h", "spreads", "totals"],
+    minProfitPct: 1.0,
   });
 
-  // Get available states and their supported sportsbooks
+  // States & sportsbooks map
   const { data: stateMap } = useQuery<{
     success: boolean;
     stateMap: Record<string, string[]>;
     totalStates: number;
     availableSportsbooks: string[];
   }>({
-    queryKey: ['/api/state-map'],
+    queryKey: ["/api/state-map"],
   });
-  
-  // Execute arbitrage scan mutation
+
+  // Execute arbitrage scan via Agent
   const scanMutation = useMutation({
-    mutationFn: async (request: ScanRequest) => {
-      const response = await apiRequest('POST', '/api/scan/arbs', { ...request, confirmed: true });
-      return await response.json();
-    },
-    onSuccess: (data: ArbitrageScanResult) => {
+    mutationFn: async (request: ScanRequest) => runAgentScan(request),
+    onSuccess: (data) => {
       setScanResults(data);
       setLastScanTime(new Date());
       toast({
-        title: "Scan Complete",
+        title: "Agent Scan Complete",
         description: `Found ${data.allOpportunities?.length || 0} opportunities. Credits used: ${data.creditUsage?.creditsConsumed || 0}`,
       });
     },
     onError: (error: any) => {
       toast({
-        title: "Scan Failed", 
-        description: error.message || "Failed to execute arbitrage scan",
+        title: "Agent Scan Failed",
+        description: error?.message ?? "The agent was unable to complete the scan.",
         variant: "destructive",
       });
-    }
+    },
   });
 
   const handleStartScan = () => {
@@ -104,24 +140,24 @@ export default function Arbitrage() {
     }
     scanMutation.mutate(filters);
   };
-  
+
   const availableStates = stateMap?.stateMap ? Object.keys(stateMap.stateMap) : [];
-  
-  // Calculate stats based on current results
-  const opportunities = scanResults?.allOpportunities || [];
+
+  // Derived stats
+  const opportunities = scanResults?.allOpportunities ?? [];
   const maxProfitPick = scanResults?.maxProfitPick;
   const totalOpportunities = opportunities.length;
-  const maxProfit = maxProfitPick?.expectedProfitPct || 0;
-  const creditsUsed = scanResults?.creditUsage?.creditsConsumed || 0;
+  const maxProfit = maxProfitPick?.expectedProfitPct ?? 0;
+  const creditsUsed = scanResults?.creditUsage?.creditsConsumed ?? 0;
 
   return (
     <div className="space-y-8">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Arbitrage Scanner</h1>
+          <h1 className="text-2xl font-bold">Arbitrage Scanner (Agent)</h1>
           <p className="text-sm text-muted-foreground">
-            Search all available sportsbooks in your selected states for arbitrage opportunities
+            The agent searches your selected states & sportsbooks for live arbitrage opportunities.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -177,10 +213,14 @@ export default function Arbitrage() {
               <div>
                 <p className="text-sm text-muted-foreground">Cache Expires</p>
                 <p className="text-2xl font-bold">
-                  {scanResults?.cacheExpiresAt 
-                    ? `${Math.max(0, Math.ceil((new Date(scanResults.cacheExpiresAt).getTime() - Date.now()) / 60000))}m`
-                    : "0m"
-                  }
+                  {scanResults?.cacheExpiresAt
+                    ? `${Math.max(
+                        0,
+                        Math.ceil(
+                          (new Date(scanResults.cacheExpiresAt).getTime() - Date.now()) / 60000
+                        )
+                      )}m`
+                    : "0m"}
                 </p>
               </div>
               <Clock className="w-8 h-8 text-amber-500" />
@@ -205,40 +245,55 @@ export default function Arbitrage() {
                   <AlertTriangle className="w-4 h-4 text-red-500" />
                   States (Required)
                 </Label>
-                {availableStates.length > 0 ? availableStates.map(state => (
-                  <div key={state} className="flex items-center space-x-2">
-                    <input
-                      type="checkbox"
-                      id={`state-${state}`}
-                      checked={filters.states.includes(state)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setFilters(prev => ({ ...prev, states: [...prev.states, state] }));
-                        } else {
-                          setFilters(prev => ({ ...prev, states: prev.states.filter(s => s !== state) }));
-                        }
-                      }}
-                      data-testid={`checkbox-state-${state}`}
-                    />
-                    <Label htmlFor={`state-${state}`} className="text-sm">{state}</Label>
-                  </div>
-                )) : (
+                {availableStates.length > 0 ? (
+                  availableStates.map((state) => (
+                    <div key={state} className="flex items-center space-x-2">
+                      <input
+                        type="checkbox"
+                        id={`state-${state}`}
+                        checked={filters.states.includes(state)}
+                        onChange={(e) => {
+                          setFilters((prev) => ({
+                            ...prev,
+                            states: e.target.checked
+                              ? [...prev.states, state]
+                              : prev.states.filter((s) => s !== state),
+                          }));
+                        }}
+                        data-testid={`checkbox-state-${state}`}
+                      />
+                      <Label htmlFor={`state-${state}`} className="text-sm">
+                        {state}
+                      </Label>
+                    </div>
+                  ))
+                ) : (
                   <div className="text-sm text-muted-foreground">Loading states...</div>
                 )}
                 {filters.states.length > 0 && stateMap?.stateMap && (
                   <p className="text-xs text-green-600 dark:text-green-400">
-                    ✓ {Array.from(new Set(filters.states.flatMap(state => stateMap.stateMap[state] || []))).length} sportsbooks available
+                    ✓{" "}
+                    {
+                      Array.from(
+                        new Set(
+                          filters.states.flatMap((s) => stateMap.stateMap[s] || [])
+                        )
+                      ).length
+                    }{" "}
+                    sportsbooks available
                   </p>
                 )}
               </div>
-              
+
               <Separator />
-              
+
               <div className="space-y-2">
                 <Label htmlFor="sports-select">Sports</Label>
-                <Select 
-                  value={filters.sports?.[0] || 'all'} 
-                  onValueChange={(value) => setFilters(prev => ({ ...prev, sports: [value] }))}
+                <Select
+                  value={filters.sports?.[0] || "all"}
+                  onValueChange={(value) =>
+                    setFilters((prev) => ({ ...prev, sports: [value] }))
+                  }
                 >
                   <SelectTrigger id="sports-select" data-testid="select-sports">
                     <SelectValue placeholder="All Sports" />
@@ -253,67 +308,83 @@ export default function Arbitrage() {
                   </SelectContent>
                 </Select>
               </div>
-              
+
               <div className="space-y-2">
                 <Label htmlFor="min-profit">Min Profit %</Label>
-                <Input 
+                <Input
                   id="min-profit"
                   type="number"
                   step="0.1"
                   min="0.1"
                   placeholder="1.0"
                   value={filters.minProfitPct}
-                  onChange={(e) => setFilters(prev => ({ ...prev, minProfitPct: parseFloat(e.target.value) || 1.0 }))}
+                  onChange={(e) =>
+                    setFilters((prev) => ({
+                      ...prev,
+                      minProfitPct: parseFloat(e.target.value) || 1.0,
+                    }))
+                  }
                   data-testid="input-min-profit"
                 />
               </div>
-              
+
               <div className="space-y-2">
                 <Label>Markets</Label>
                 <div className="space-y-2">
-                  {['h2h', 'spreads', 'totals'].map(market => (
+                  {["h2h", "spreads", "totals"].map((market) => (
                     <div key={market} className="flex items-center space-x-2">
                       <input
                         type="checkbox"
                         id={`market-${market}`}
                         checked={filters.markets?.includes(market)}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setFilters(prev => ({ ...prev, markets: [...(prev.markets || []), market] }));
-                          } else {
-                            setFilters(prev => ({ ...prev, markets: (prev.markets || []).filter(m => m !== market) }));
-                          }
-                        }}
+                        onChange={(e) =>
+                          setFilters((prev) => ({
+                            ...prev,
+                            markets: e.target.checked
+                              ? [...(prev.markets || []), market]
+                              : (prev.markets || []).filter((m) => m !== market),
+                          }))
+                        }
                         data-testid={`checkbox-market-${market}`}
                       />
                       <Label htmlFor={`market-${market}`} className="text-sm capitalize">
-                        {market === 'h2h' ? 'Moneyline' : market === 'spreads' ? 'Point Spreads' : 'Totals (O/U)'}
+                        {market === "h2h"
+                          ? "Moneyline"
+                          : market === "spreads"
+                          ? "Point Spreads"
+                          : "Totals (O/U)"}
                       </Label>
                     </div>
                   ))}
                 </div>
               </div>
             </div>
-            
+
             <Separator />
-            
-            <Button 
+
+            <Button
               className="w-full"
               onClick={handleStartScan}
               disabled={scanMutation.isPending || filters.states.length === 0}
               data-testid="button-start-scan"
             >
               {scanMutation.isPending ? (
-                <><Search className="w-4 h-4 mr-2 animate-spin" /> Scanning...</>
+                <>
+                  <Search className="w-4 h-4 mr-2 animate-spin" /> Scanning via Agent...
+                </>
               ) : (
-                <><Search className="w-4 h-4 mr-2" /> Search All Sportsbooks</>
+                <>
+                  <Search className="w-4 h-4 mr-2" /> Search All Sportsbooks
+                </>
               )}
             </Button>
-            
+
             {filters.states.length === 0 && (
               <Alert className="border-red-500/20 bg-red-50 dark:bg-red-950/20">
                 <AlertTriangle className="h-4 w-4 text-red-500" />
-                <AlertTitle className="text-red-700 dark:text-red-400">State Required</AlertTitle>
+                <AlertTitle className="text-red-700 dark:text-red-400">
+                  State Required
+                </AlertTitle>
                 <AlertDescription className="text-red-600 dark:text-red-300">
                   Select at least one state to search available sportsbooks
                 </AlertDescription>
@@ -342,7 +413,10 @@ export default function Arbitrage() {
                   <div className="space-y-3">
                     <h4 className="font-medium">Betting Legs</h4>
                     {maxProfitPick.legs.map((leg, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-3 bg-white dark:bg-gray-900 rounded-lg border">
+                      <div
+                        key={idx}
+                        className="flex items-center justify-between p-3 bg-white dark:bg-gray-900 rounded-lg border"
+                      >
                         <div>
                           <p className="font-medium">{leg.outcome}</p>
                           <p className="text-sm text-muted-foreground">{leg.sportsbook}</p>
@@ -354,17 +428,21 @@ export default function Arbitrage() {
                       </div>
                     ))}
                   </div>
-                  
+
                   <div className="space-y-3">
                     <h4 className="font-medium">Performance Metrics</h4>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="text-center p-3 bg-white dark:bg-gray-900 rounded-lg border">
                         <p className="text-sm text-muted-foreground">Expected Profit</p>
-                        <p className="text-lg font-bold text-green-600">{maxProfitPick.expectedProfitPct.toFixed(2)}%</p>
+                        <p className="text-lg font-bold text-green-600">
+                          {maxProfitPick.expectedProfitPct.toFixed(2)}%
+                        </p>
                       </div>
                       <div className="text-center p-3 bg-white dark:bg-gray-900 rounded-lg border">
                         <p className="text-sm text-muted-foreground">Confidence</p>
-                        <p className="text-lg font-bold text-blue-600">{(maxProfitPick.confidenceScore * 100).toFixed(0)}%</p>
+                        <p className="text-lg font-bold text-blue-600">
+                          {(maxProfitPick.confidenceScore * 100).toFixed(0)}%
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -383,7 +461,7 @@ export default function Arbitrage() {
             <CardContent>
               {scanMutation.isPending ? (
                 <div className="space-y-4">
-                  {[1, 2, 3].map(i => (
+                  {[1, 2, 3].map((i) => (
                     <div key={i} className="animate-pulse">
                       <div className="h-24 bg-muted rounded-lg"></div>
                     </div>
@@ -392,11 +470,12 @@ export default function Arbitrage() {
               ) : opportunities.length > 0 ? (
                 <div className="space-y-4">
                   {[...opportunities]
-                    .sort((a, b) => (b.profitPct || 0) - (a.profitPct || 0)) // Sort by profit descending
-                    .map((opportunity, idx) => {
-                      const isFeatured = maxProfitPick && opportunity.id === maxProfitPick.eventId;
+                    .sort((a, b) => (b.profitPct || 0) - (a.profitPct || 0))
+                    .map((opportunity) => {
+                      const isFeatured =
+                        maxProfitPick && opportunity.id === maxProfitPick.eventId;
                       return (
-                        <div key={opportunity.id} className={isFeatured ? 'opacity-50 relative' : ''}>
+                        <div key={opportunity.id} className={isFeatured ? "opacity-50 relative" : ""}>
                           {isFeatured && (
                             <div className="absolute inset-0 bg-green-500/10 rounded-lg border border-green-500/20 flex items-center justify-center">
                               <Badge className="bg-green-600 text-white">Featured Above</Badge>
@@ -420,7 +499,7 @@ export default function Arbitrage() {
                   <Search className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                   <h3 className="text-lg font-medium mb-2">Ready to Scan</h3>
                   <p className="text-muted-foreground mb-4">
-                    Configure your settings and click "Search All Sportsbooks" to find arbitrage opportunities.
+                    Configure your settings and click "Search All Sportsbooks" to run the agent.
                   </p>
                 </div>
               )}
