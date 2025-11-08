@@ -20,6 +20,23 @@ import { hedgeService } from "./services/hedgeService";
 import { jobScheduler } from "./services/jobScheduler";
 import { featureFlagService } from "./services/featureFlagService";
 import { auditService } from "./services/auditService";
+// Lightweight bearer guard for machine-to-machine calls (e.g., n8n)
+function requireBearerOrReject(req: any, res: any, next: any) {
+  const expected = process.env.JOB_BEARER_TOKEN;
+  if (!expected) {
+    console.error('JOB_BEARER_TOKEN not set');
+    return res.status(500).json({ message: 'Server misconfigured' });
+  }
+  const header = req.header('Authorization') || '';
+  if (!header.startsWith('Bearer ')) {
+    return res.status(401).json({ message: 'Missing bearer token' });
+  }
+  const token = header.slice('Bearer '.length).trim();
+  if (token !== expected) {
+    return res.status(403).json({ message: 'Invalid bearer token' });
+  }
+  next();
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Auth middleware
@@ -609,7 +626,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post('/api/jobs/:name:run', isAuthenticated, async (req: any, res) => {
+  app.post('/api/jobs/:name/run', isAuthenticated, async (req: any, res) => {
     try {
       const jobName = req.params.name;
       
@@ -622,7 +639,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ message: "Failed to run job" });
     }
   });
-
+app.post('/api/n8n/jobs/:name/run', requireBearerOrReject, async (req: any, res) => {
+  try {
+    const jobName = req.params.name;
+    await auditService.log('system', 'job_triggered_m2m', 'job', null, { jobName, via: 'n8n' });
+    const job = await jobScheduler.runJob(jobName);
+    res.json({ ok: true, jobName, job });
+  } catch (error) {
+    console.error("Error running n8n job:", error);
+    res.status(500).json({ message: "Failed to run n8n job" });
+  }
+});
   // Feature flags routes
   app.get('/api/flags', isAuthenticated, async (req, res) => {
     try {
